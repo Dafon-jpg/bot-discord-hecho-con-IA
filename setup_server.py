@@ -468,6 +468,42 @@ async def setup_server(guild: discord.Guild, status_channel=None):
 
     await send_status("⏳ **Iniciando configuración del servidor...**")
 
+    # ─── FASE 0: LIMPIAR CANALES DEL TEMPLATE ─────────────────────────
+    await send_status("🧹 Limpiando canales del template de Discord...")
+    template_channels = [
+        "welcome-and-rules", "announcements", "resources",
+        "general", "meeting-plans", "off-topic",
+    ]
+    template_voice = ["Lounge", "Meeting Room 1", "Meeting Room 2"]
+    template_categories = ["Information", "Text Channels", "Voice Channels"]
+
+    for ch in guild.text_channels:
+        if ch.name in template_channels:
+            try:
+                await ch.delete(reason="Limpieza de template para setup UBA")
+                await send_status(f"  🗑️ Canal eliminado: **#{ch.name}**")
+                await asyncio.sleep(0.3)
+            except discord.HTTPException:
+                pass
+
+    for vc in guild.voice_channels:
+        if vc.name in template_voice:
+            try:
+                await vc.delete(reason="Limpieza de template para setup UBA")
+                await send_status(f"  🗑️ Canal de voz eliminado: **{vc.name}**")
+                await asyncio.sleep(0.3)
+            except discord.HTTPException:
+                pass
+
+    for cat in guild.categories:
+        if cat.name in template_categories:
+            try:
+                await cat.delete(reason="Limpieza de template para setup UBA")
+                await send_status(f"  🗑️ Categoría eliminada: **{cat.name}**")
+                await asyncio.sleep(0.3)
+            except discord.HTTPException:
+                pass
+
     # ─── FASE 1: CREAR ROLES ───────────────────────────────────────────
     await send_status("🎨 Creando roles...")
     roles = {}
@@ -508,7 +544,10 @@ async def setup_server(guild: discord.Guild, status_channel=None):
         existing_cat = discord.utils.get(guild.categories, name=cat_name)
         if existing_cat is None:
             try:
-                category = await guild.create_category(name=cat_name, overwrites=overwrites)
+                cat_kwargs = {"name": cat_name}
+                if overwrites:
+                    cat_kwargs["overwrites"] = overwrites
+                category = await guild.create_category(**cat_kwargs)
                 await send_status(f"  📁 Categoría creada: **{cat_name}**")
                 await asyncio.sleep(0.3)
             except discord.HTTPException as e:
@@ -545,8 +584,9 @@ async def setup_server(guild: discord.Guild, status_channel=None):
 
             try:
                 if ch_type == "text":
-                    # Overwrites para canales read-only
-                    ch_overwrites = None
+                    # Kwargs para la creación del canal
+                    kwargs = {"name": ch_name, "topic": ch_cfg.get("topic", "")}
+
                     if ch_cfg.get("read_only"):
                         ch_overwrites = {
                             guild.default_role: PermissionOverwrite(send_messages=False),
@@ -557,12 +597,9 @@ async def setup_server(guild: discord.Guild, status_channel=None):
                             for role_key, perm in overwrites.items():
                                 if role_key not in ch_overwrites:
                                     ch_overwrites[role_key] = perm
+                        kwargs["overwrites"] = ch_overwrites
 
-                    channel = await category.create_text_channel(
-                        name=ch_name,
-                        topic=ch_cfg.get("topic", ""),
-                        overwrites=ch_overwrites
-                    )
+                    channel = await category.create_text_channel(**kwargs)
 
                     # Guardar referencia a canales especiales
                     if "auto-roles" in channel.name:
@@ -571,9 +608,10 @@ async def setup_server(guild: discord.Guild, status_channel=None):
                         comandos_channel = channel
 
                 else:  # voice
-                    ch_overwrites = None
+                    kwargs = {"name": ch_name}
+
                     if ch_cfg.get("muted"):
-                        ch_overwrites = {
+                        kwargs["overwrites"] = {
                             guild.default_role: PermissionOverwrite(
                                 connect=True,
                                 speak=False,
@@ -585,10 +623,7 @@ async def setup_server(guild: discord.Guild, status_channel=None):
                             ),
                         }
 
-                    channel = await category.create_voice_channel(
-                        name=ch_name,
-                        overwrites=ch_overwrites
-                    )
+                    channel = await category.create_voice_channel(**kwargs)
 
                 await send_status(f"    📌 Canal creado: **{ch_name}**")
                 await asyncio.sleep(0.3)
