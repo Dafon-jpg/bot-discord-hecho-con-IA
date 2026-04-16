@@ -79,6 +79,7 @@ CATEGORIES_CONFIG = [
         "name": "🎓 CBC - CICLO BÁSICO COMÚN",
         "overwrites_type": "open",
         "channels": [
+            {"name": "📚biblioteca-cbc", "type": "text", "topic": "📖 Biblioteca específica de CBC — PDFs, apuntes, links y drives de las materias del Ciclo Básico Común."},
             {"name": "📖ipc-40", "type": "text", "topic": "🧠 Introducción al Pensamiento Científico (40) — Común a todas las carreras"},
             {"name": "🏛sociedad-y-estado-24", "type": "text", "topic": "📜 ICSE - Introducción al Conocimiento de la Sociedad y Estado (24) — Común a todas las carreras"},
             {"name": "📐analisis-matematico-66", "type": "text", "topic": "📊 Análisis Matemático (66) — Exactas / Ingeniería"},
@@ -156,6 +157,139 @@ CATEGORY_COLORS = {
     "🎮 RECREO & BOTS": 0xE91E63,
     "🔊 BIBLIOTECA DE VOZ": 0x607D8B,
 }
+
+
+# =============================================================================
+# TAGS DEL FORUM CHANNEL BIBLIOTECA-GENERAL
+# =============================================================================
+# Lista de (nombre, emoji) — usada al crear el forum y al etiquetar threads
+
+BIBLIOTECA_TAGS = [
+    # Tipo de recurso
+    ("PDF",        "📄"),
+    ("YouTube",    "🎥"),
+    ("Drive",      "📁"),
+    ("Exapuni",    "📚"),
+    ("GitHub",     "💻"),
+    ("Imagen",     "🖼️"),
+    ("Documento",  "📝"),
+    ("Planilla",   "📊"),
+    ("Zip",        "💾"),
+    ("Link",       "🔗"),
+    # Categoría/origen
+    ("CBC",        "🎓"),
+    ("Exactas",    "🔬"),
+    ("Derecho",    "⚖️"),
+    ("Campus",     "🏫"),
+]
+
+# Patrones de URL para identificar el tipo de link
+URL_TYPE_PATTERNS = [
+    ("YouTube",   re.compile(r"(youtube\.com|youtu\.be)", re.IGNORECASE)),
+    ("Drive",     re.compile(r"drive\.google\.com",       re.IGNORECASE)),
+    ("Exapuni",   re.compile(r"exapuni\.com",             re.IGNORECASE)),
+    ("GitHub",    re.compile(r"github\.com",              re.IGNORECASE)),
+    ("Documento", re.compile(r"docs\.google\.com",        re.IGNORECASE)),
+    ("Planilla",  re.compile(r"sheets\.google\.com",      re.IGNORECASE)),
+]
+
+# Extensiones de archivo → nombre de tag
+EXT_TO_TAG = {
+    ".pdf": "PDF",
+    ".doc": "Documento", ".docx": "Documento",
+    ".xls": "Planilla", ".xlsx": "Planilla",
+    ".ppt": "Documento", ".pptx": "Documento",
+    ".jpg": "Imagen", ".jpeg": "Imagen", ".png": "Imagen",
+    ".gif": "Imagen", ".webp": "Imagen",
+    ".zip": "Zip", ".rar": "Zip", ".7z": "Zip",
+}
+
+
+def get_biblioteca_forum(guild: discord.Guild):
+    """Encuentra el ForumChannel de biblioteca-general."""
+    return discord.utils.find(
+        lambda c: isinstance(c, discord.ForumChannel) and "biblioteca-general" in c.name,
+        guild.channels
+    )
+
+
+def find_tag(forum: discord.ForumChannel, tag_name: str):
+    """Busca un ForumTag por nombre dentro de los available_tags del forum."""
+    if forum is None:
+        return None
+    return discord.utils.get(forum.available_tags, name=tag_name)
+
+
+def detect_resource_tags(forum: discord.ForumChannel, message: discord.Message):
+    """
+    Analiza un mensaje y retorna la lista de ForumTags aplicables
+    (tipo de recurso + categoría de origen). Máximo 5 (límite de Discord).
+    """
+    if forum is None:
+        return []
+
+    detected_names = []
+    content = message.content or ""
+
+    # 1. Detectar tipo de link
+    for tag_name, pattern in URL_TYPE_PATTERNS:
+        if pattern.search(content):
+            detected_names.append(tag_name)
+
+    # 2. Detectar tipo por archivos adjuntos
+    for att in message.attachments:
+        ext = os.path.splitext(att.filename)[1].lower()
+        tag_name = EXT_TO_TAG.get(ext)
+        if tag_name and tag_name not in detected_names:
+            detected_names.append(tag_name)
+
+    # 3. Si hay links pero ningún tipo específico matcheó → Link genérico
+    has_url = bool(RESOURCE_PATTERN.search(content))
+    if has_url and not any(n in detected_names for n in ("YouTube", "Drive", "Exapuni", "GitHub", "Documento", "Planilla")):
+        detected_names.append("Link")
+
+    # 4. Tag según categoría de origen del canal
+    cat_name = (message.channel.category.name if message.channel.category else "").upper()
+    if "CBC" in cat_name:
+        detected_names.append("CBC")
+    elif "EXACTAS" in cat_name or "INGENIER" in cat_name:
+        detected_names.append("Exactas")
+    elif "DERECHO" in cat_name:
+        detected_names.append("Derecho")
+    elif "CAMPUS" in cat_name:
+        detected_names.append("Campus")
+
+    # 5. Convertir nombres a ForumTag objetos, dedup, máx 5
+    tags = []
+    seen = set()
+    for name in detected_names:
+        if name in seen:
+            continue
+        tag = find_tag(forum, name)
+        if tag:
+            tags.append(tag)
+            seen.add(name)
+        if len(tags) >= 5:
+            break
+
+    return tags
+
+
+def build_thread_title(message: discord.Message) -> str:
+    """Construye un título corto para el thread del forum (máx 90 chars)."""
+    # Preferencia: primer archivo adjunto, si no, primeras palabras del contenido
+    if message.attachments:
+        filename = message.attachments[0].filename
+        title = f"📎 {filename}"
+    elif message.content:
+        title = message.content.strip().split("\n")[0]
+    else:
+        title = "Recurso compartido"
+
+    # Limitar a 90 chars (límite Discord: 100)
+    if len(title) > 90:
+        title = title[:87] + "..."
+    return title or "Recurso compartido"
 
 
 # =============================================================================
@@ -346,42 +480,36 @@ async def on_message(message: discord.Message):
         await bot.process_commands(message)
         return
 
+    # Anti-loop: no mirrorear mensajes que ya están dentro del forum biblioteca
+    channel = message.channel
+
+    # 1) Si es el propio canal biblioteca-general (legacy text o forum container)
+    if "biblioteca-general" in (getattr(channel, "name", "") or ""):
+        await bot.process_commands(message)
+        return
+
+    # 2) Si es un thread cuyo parent es el forum biblioteca-general
+    parent = getattr(channel, "parent", None)
+    if parent is not None and "biblioteca-general" in (getattr(parent, "name", "") or ""):
+        await bot.process_commands(message)
+        return
+
     # Detectar recursos (archivos adjuntos o links)
     has_files = len(message.attachments) > 0
     has_links = bool(RESOURCE_PATTERN.search(message.content or ""))
 
-    # Verificar extensiones de archivos adjuntos
-    has_resource_files = any(
-        os.path.splitext(att.filename)[1].lower() in FILE_EXTENSIONS
-        for att in message.attachments
-    )
-
     if has_files or has_links:
-        # No recopilar del propio canal biblioteca
-        if "biblioteca-general" not in (message.channel.name or ""):
-            await mirror_to_biblioteca(message, has_resource_files, has_links)
+        await mirror_to_biblioteca(message, has_files, has_links)
 
     # IMPORTANTE: procesar comandos después
     await bot.process_commands(message)
 
 
-async def mirror_to_biblioteca(message: discord.Message, has_files: bool, has_links: bool):
-    """Copia un mensaje con recursos al canal #biblioteca-general."""
-    biblioteca = discord.utils.get(message.guild.text_channels, name="📚biblioteca-general")
-    if biblioteca is None:
-        # Intentar buscar sin emoji (Discord sanitiza nombres)
-        biblioteca = discord.utils.find(
-            lambda c: "biblioteca-general" in c.name,
-            message.guild.text_channels
-        )
-    if biblioteca is None:
-        return
-
-    # Determinar color del embed según categoría
+def build_resource_embed(message: discord.Message, has_links: bool) -> Embed:
+    """Construye el embed con la info completa del recurso."""
     cat_name = message.channel.category.name if message.channel.category else "Sin categoría"
     color = CATEGORY_COLORS.get(cat_name, 0x95A5A6)
 
-    # Construir embed
     embed = Embed(
         title="📚 Nuevo recurso compartido",
         color=color,
@@ -402,14 +530,12 @@ async def mirror_to_biblioteca(message: discord.Message, has_files: bool, has_li
         inline=True
     )
 
-    # Contenido del mensaje (truncado)
     if message.content:
         content_preview = message.content[:300]
         if len(message.content) > 300:
             content_preview += "..."
         embed.add_field(name="💬 Contenido", value=content_preview, inline=False)
 
-    # Listar archivos adjuntos
     if message.attachments:
         file_list = []
         for att in message.attachments:
@@ -417,35 +543,85 @@ async def mirror_to_biblioteca(message: discord.Message, has_files: bool, has_li
             file_list.append(f"📎 **{att.filename}** ({size_mb:.1f} MB)")
         embed.add_field(name="📁 Archivos", value="\n".join(file_list), inline=False)
 
-    # Extraer links del mensaje
     if has_links and message.content:
         links = RESOURCE_PATTERN.findall(message.content)
         if links:
-            link_list = [f"🔗 {link}" for link in links[:5]]  # Max 5 links
+            link_list = [f"🔗 {link}" for link in links[:5]]
             if len(links) > 5:
                 link_list.append(f"_...y {len(links) - 5} más_")
             embed.add_field(name="🌐 Enlaces", value="\n".join(link_list), inline=False)
 
     embed.set_footer(text=f"Recopilado automáticamente de #{message.channel.name}")
+    return embed
+
+
+async def mirror_to_biblioteca(message: discord.Message, has_files: bool, has_links: bool):
+    """
+    Copia un mensaje con recursos al forum #biblioteca-general como un nuevo thread,
+    con auto-detección de tags (tipo de recurso + categoría de origen).
+    """
+    forum = get_biblioteca_forum(message.guild)
+
+    # Fallback: si todavía no hay forum (no se ejecutó !upgrade-biblioteca),
+    # usar el canal de texto legacy para no perder recursos
+    if forum is None:
+        await _mirror_to_text_channel(message, has_links)
+        return
+
+    # Detectar tags aplicables (máx 5)
+    applied_tags = detect_resource_tags(forum, message)
+
+    # Título del thread
+    title = build_thread_title(message)
+
+    # Embed con info completa
+    embed = build_resource_embed(message, has_links)
+
+    # Preparar archivos adjuntos (máx 25MB c/u)
+    files_to_send = []
+    for att in message.attachments:
+        if att.size < 25 * 1024 * 1024:
+            try:
+                files_to_send.append(await att.to_file())
+            except Exception:
+                pass
+
+    # Crear thread en el forum
+    try:
+        await forum.create_thread(
+            name=title,
+            embed=embed,
+            files=files_to_send if files_to_send else discord.utils.MISSING,
+            applied_tags=applied_tags,
+        )
+    except discord.HTTPException as e:
+        print(f"Error al crear thread en biblioteca forum: {e}")
+
+
+async def _mirror_to_text_channel(message: discord.Message, has_links: bool):
+    """Fallback: envía al canal de texto biblioteca-general si el forum aún no existe."""
+    biblioteca = discord.utils.find(
+        lambda c: "biblioteca-general" in c.name,
+        message.guild.text_channels
+    )
+    if biblioteca is None:
+        return
+
+    embed = build_resource_embed(message, has_links)
 
     try:
         await biblioteca.send(embed=embed)
-
-        # Re-subir archivos si son menores a 25MB
         files_to_send = []
         for att in message.attachments:
-            if att.size < 25 * 1024 * 1024:  # 25MB límite de Discord
+            if att.size < 25 * 1024 * 1024:
                 try:
-                    file = await att.to_file()
-                    files_to_send.append(file)
+                    files_to_send.append(await att.to_file())
                 except Exception:
                     pass
-
         if files_to_send:
             await biblioteca.send(files=files_to_send)
-
     except discord.HTTPException as e:
-        print(f"Error al enviar a biblioteca: {e}")
+        print(f"Error al enviar a biblioteca (fallback texto): {e}")
 
 
 # =============================================================================
@@ -880,6 +1056,98 @@ async def setup_error(ctx: commands.Context, error):
     else:
         await ctx.send(f"❌ Error inesperado: {error}")
         print(f"Error en !setup: {error}")
+
+
+# =============================================================================
+# COMANDO !UPGRADE-BIBLIOTECA (texto → forum channel)
+# =============================================================================
+
+@bot.command(name="upgrade-biblioteca")
+@commands.has_permissions(administrator=True)
+async def upgrade_biblioteca_command(ctx: commands.Context):
+    """Convierte el canal de texto biblioteca-general en un Forum Channel con tags."""
+    guild = ctx.guild
+
+    # Si ya existe el forum, avisar y salir
+    existing_forum = get_biblioteca_forum(guild)
+    if existing_forum:
+        await ctx.send(f"⚠️ El forum ya existe: {existing_forum.mention}")
+        return
+
+    await ctx.send("⏳ **Actualizando biblioteca-general a Forum Channel...**")
+
+    # Buscar la categoría RECEPCIÓN
+    recepcion = discord.utils.find(
+        lambda c: "RECEPCI" in c.name.upper(),
+        guild.categories
+    )
+    if recepcion is None:
+        await ctx.send("❌ No se encontró la categoría RECEPCIÓN. Ejecutá `!setup` primero.")
+        return
+
+    # Buscar y borrar el canal de texto legacy
+    old_channel = discord.utils.find(
+        lambda c: "biblioteca-general" in c.name,
+        guild.text_channels
+    )
+    if old_channel:
+        try:
+            await old_channel.delete(reason="Upgrade a Forum Channel con tags")
+            await ctx.send(f"🗑️ Canal de texto anterior eliminado.")
+            await asyncio.sleep(0.5)
+        except discord.HTTPException as e:
+            await ctx.send(f"❌ No pude borrar el canal viejo: {e}")
+            return
+
+    # Construir lista de ForumTags
+    forum_tags = [
+        discord.ForumTag(
+            name=name,
+            emoji=discord.PartialEmoji(name=emoji)
+        )
+        for name, emoji in BIBLIOTECA_TAGS
+    ]
+
+    # Crear el Forum Channel
+    try:
+        forum = await guild.create_forum(
+            name="📚biblioteca-general",
+            category=recepcion,
+            topic=(
+                "📖 Biblioteca centralizada del servidor UBA. "
+                "Todo recurso (PDF, link, Drive, YouTube, etc.) compartido en "
+                "cualquier canal se publica acá automáticamente como un thread. "
+                "Usá los tags de arriba para filtrar por tipo o categoría."
+            ),
+            available_tags=forum_tags,
+        )
+    except discord.HTTPException as e:
+        await ctx.send(f"❌ Error creando el forum: {e}")
+        return
+
+    # Mensaje de éxito con resumen de tags
+    tag_list = " ".join(f"{emoji}`{name}`" for name, emoji in BIBLIOTECA_TAGS)
+    embed = Embed(
+        title="✅ Biblioteca actualizada",
+        description=(
+            f"El canal {forum.mention} ahora es un **Forum Channel** "
+            f"con {len(BIBLIOTECA_TAGS)} tags para filtrar recursos.\n\n"
+            f"**Tags disponibles:**\n{tag_list}\n\n"
+            "🔍 **Cómo usar:** Entrá al forum y hacé click en cualquier tag "
+            "para filtrar todos los recursos de ese tipo."
+        ),
+        color=Colour.green()
+    )
+    await ctx.send(embed=embed)
+
+
+@upgrade_biblioteca_command.error
+async def upgrade_biblioteca_error(ctx: commands.Context, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ Necesitás permisos de **Administrador** para ejecutar este comando.")
+    else:
+        await ctx.send(f"❌ Error inesperado: {error}")
+        print(f"Error en !upgrade-biblioteca: {error}")
 
 
 # =============================================================================
