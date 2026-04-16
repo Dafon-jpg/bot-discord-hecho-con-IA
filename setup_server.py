@@ -1157,6 +1157,121 @@ async def upgrade_biblioteca_error(ctx: commands.Context, error):
 
 
 # =============================================================================
+# COMANDO !SCAN-BIBLIOTECA (repaso retroactivo del historial)
+# =============================================================================
+
+@bot.command(name="scan-biblioteca")
+@commands.has_permissions(administrator=True)
+async def scan_biblioteca_command(ctx: commands.Context, limit: int = 500):
+    """
+    Repasa el historial de todos los canales y sube los recursos encontrados
+    al forum biblioteca-general. Uso: !scan-biblioteca [límite por canal, default 500]
+    ⚠️ Ejecutar solo una vez para evitar duplicados.
+    """
+    guild = ctx.guild
+    forum = get_biblioteca_forum(guild)
+
+    if forum is None:
+        await ctx.send(
+            "❌ No existe el forum **biblioteca-general**.\n"
+            "Ejecutá primero `!upgrade-biblioteca`."
+        )
+        return
+
+    # Obtener IDs de canales a ignorar (las propias bibliotecas y sus threads)
+    SKIP_NAMES = {"biblioteca-general", "biblioteca-cbc", "biblioteca-digital", "bibliografia-derecho"}
+
+    # Recopilar todos los canales de texto a escanear
+    channels_to_scan = []
+    for ch in guild.text_channels:
+        # Saltar canales de biblioteca y canales sin permiso de lectura
+        if any(skip in ch.name for skip in SKIP_NAMES):
+            continue
+        if not ch.permissions_for(guild.me).read_message_history:
+            continue
+        channels_to_scan.append(ch)
+
+    total_channels = len(channels_to_scan)
+    status_msg = await ctx.send(
+        f"🔍 **Escaneando {total_channels} canales** (últimos {limit} mensajes c/u)...\n"
+        f"Esto puede tardar varios minutos. No ejecutes el comando de nuevo hasta que termine."
+    )
+
+    found_total = 0
+    errors_total = 0
+
+    for idx, channel in enumerate(channels_to_scan, 1):
+        found_in_channel = 0
+        try:
+            # oldest_first=True para mantener orden cronológico en el forum
+            async for message in channel.history(limit=limit, oldest_first=True):
+                # Ignorar mensajes del bot
+                if message.author.bot:
+                    continue
+
+                has_files = len(message.attachments) > 0
+                has_links = bool(RESOURCE_PATTERN.search(message.content or ""))
+
+                if has_files or has_links:
+                    try:
+                        await mirror_to_biblioteca(message, has_files, has_links)
+                        found_in_channel += 1
+                        found_total += 1
+                        # Pausa entre threads para respetar rate limits de Discord
+                        await asyncio.sleep(1.2)
+                    except discord.HTTPException as e:
+                        errors_total += 1
+                        print(f"Error mirroреando mensaje {message.jump_url}: {e}")
+                        await asyncio.sleep(2)
+
+        except discord.Forbidden:
+            pass  # Sin acceso al canal, continuar
+        except discord.HTTPException as e:
+            print(f"Error leyendo historial de #{channel.name}: {e}")
+
+        # Actualizar progreso cada 5 canales
+        if idx % 5 == 0 or idx == total_channels:
+            try:
+                await status_msg.edit(
+                    content=(
+                        f"🔍 **Escaneando...** {idx}/{total_channels} canales\n"
+                        f"✅ Recursos encontrados hasta ahora: **{found_total}**"
+                    )
+                )
+            except discord.HTTPException:
+                pass
+
+    # Mensaje final
+    embed = Embed(
+        title="✅ Scan de biblioteca completado",
+        color=Colour.green() if errors_total == 0 else Colour.orange()
+    )
+    embed.add_field(name="📂 Canales escaneados", value=str(total_channels), inline=True)
+    embed.add_field(name="📚 Recursos subidos", value=str(found_total), inline=True)
+    if errors_total:
+        embed.add_field(name="⚠️ Errores", value=str(errors_total), inline=True)
+    embed.add_field(
+        name="💡 Tip",
+        value=f"Abrí {forum.mention} y filtrá por tags para encontrar recursos por tipo o materia.",
+        inline=False
+    )
+    embed.set_footer(text="⚠️ No ejecutes !scan-biblioteca de nuevo para evitar duplicados.")
+
+    await ctx.send(embed=embed)
+
+
+@scan_biblioteca_command.error
+async def scan_biblioteca_error(ctx: commands.Context, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ Necesitás permisos de **Administrador** para ejecutar este comando.")
+    elif isinstance(error, commands.BadArgument):
+        await ctx.send("❌ Uso correcto: `!scan-biblioteca [número]` — ejemplo: `!scan-biblioteca 1000`")
+    else:
+        await ctx.send(f"❌ Error inesperado: {error}")
+        print(f"Error en !scan-biblioteca: {error}")
+
+
+# =============================================================================
 # INICIO DEL BOT
 # =============================================================================
 
