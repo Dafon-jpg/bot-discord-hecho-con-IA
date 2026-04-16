@@ -32,7 +32,13 @@ from dotenv import load_dotenv
 import os
 import re
 import asyncio
+import sys
+import io
 from datetime import datetime
+
+# Fix para consola Windows: forzar UTF-8 para poder imprimir emojis
+if sys.platform == "win32" and hasattr(sys.stdout, "buffer"):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
 
 # =============================================================================
